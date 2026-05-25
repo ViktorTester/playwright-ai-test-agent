@@ -1,0 +1,31 @@
+{
+  "name": "playwright-ai-test-agent",
+  "version": "1.0.0",
+  "description": "AI-assisted Playwright test automation project that analyzes web pages, suggests test cases, generates tests, runs them, and improves failed tests.",
+  "main": "index.js",
+  "scripts": {
+    "test": "playwright test",
+    "test:smoke": "playwright test --grep @smoke",
+    "test:regression": "playwright test --grep @regression",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "report": "playwright show-report",
+    "agent": "tsx src/agent/agentRunner.ts"
+  },
+  "keywords": [],
+  "author": "Viktor K.",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/fs-extra": "^11.0.4",
+    "dotenv": "^17.4.2",
+    "execa": "^8.0.1",
+    "fs-extra": "^11.3.5",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3",
+    "zod": "^3.25.76"
+  },
+  "dependencies": {
+    "openai": "^4.0.0"
+  }
+}
