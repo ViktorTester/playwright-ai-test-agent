@@ -26,6 +26,6 @@
     "zod": "^3.25.76"
   },
   "dependencies": {
-    "openai": "^4.0.0"
+    "openai": "^6.39.0"
   }
 }
