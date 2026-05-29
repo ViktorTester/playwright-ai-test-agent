@@ -21,6 +21,13 @@ export class LoginPage {
         await this.page.goto("/");
     }
 
+    @step("Verify login page is loaded")
+    async expectLoaded(): Promise<void> {
+        await expect(this.usernameInput).toBeVisible();
+        await expect(this.passwordInput).toBeVisible();
+        await expect(this.loginButton).toBeVisible();
+    }
+
     @step("Login with username: {0}")
     async login(username: string, password: string): Promise<void> {
         await this.usernameInput.fill(username);
@@ -29,14 +36,11 @@ export class LoginPage {
     }
 
     @step("Verify login error message")
-    async expectErrorMessage(): Promise<void> {
+    async expectErrorMessage(expectedMessage?: string): Promise<void> {
         await expect(this.errorMessage).toBeVisible();
-    }
 
-    @step("Verify login page is opened")
-    async expectLoaded(): Promise<void> {
-        await expect(this.usernameInput).toBeVisible();
-        await expect(this.passwordInput).toBeVisible();
-        await expect(this.loginButton).toBeVisible();
+        if (expectedMessage) {
+            await expect(this.errorMessage).toHaveText(expectedMessage);
+        }
     }
 }
