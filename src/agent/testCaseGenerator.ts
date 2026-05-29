@@ -1,6 +1,7 @@
 import {z} from "zod";
 import type {SiteAnalysisResult} from "./siteAnalyzer";
 import {createOpenAiClient} from "../ai/openAiClient";
+import {renderPomApiContract} from "./pomContract";
 
 const TestTypeSchema = z.enum(["smoke", "regression"]);
 const RiskLevelSchema = z.enum(["low", "medium", "high"]);
@@ -30,7 +31,6 @@ export async function generateTestCases(
     siteAnalysis: SiteAnalysisResult,
 ): Promise<TestCaseGenerationResult> {
     const openai = createOpenAiClient();
-
     const model = process.env.AI_MODEL ?? "gpt-4.1-mini";
 
     const response = await openai.responses.create({
@@ -44,7 +44,8 @@ export async function generateTestCases(
                     "Use risk-based testing.",
                     "Separate smoke and regression scenarios.",
                     "Prefer stable scenarios suitable for Page Object Model.",
-                    "Do not invent unsupported functionality.",
+                    "Use only the POM methods listed in the provided POM API contract.",
+                    "Do not invent unsupported POM methods in suggestedPomMethods.",
                     "Return only valid JSON.",
                     "Do not wrap the JSON in markdown.",
                 ].join("\n"),
@@ -52,21 +53,16 @@ export async function generateTestCases(
             {
                 role: "user",
                 content: [
-                    "Analyze this website model and propose test cases.",
-                    "",
-                    "Target application: SauceDemo.",
+                    "Analyze this website model and propose test cases for SauceDemo.",
+                    "Generate a compact suite: 2-3 smoke tests and 3-5 regression tests maximum.",
+                    "Do not generate scenarios that cannot be implemented with the POM API contract below.",
                     "Known credentials:",
                     "- standard_user / secret_sauce",
                     "- locked_out_user / secret_sauce",
                     "",
-                    "Existing POM classes:",
-                    "- LoginPage",
-                    "- InventoryPage",
-                    "- CartPage",
-                    "- CheckoutPage",
+                    renderPomApiContract(),
                     "",
                     "Return JSON using exactly this structure:",
-                    "",
                     JSON.stringify(
                         {
                             applicationName: "SauceDemo",
@@ -81,13 +77,14 @@ export async function generateTestCases(
                                     preconditions: ["User is on the login page"],
                                     steps: [
                                         "Open login page",
-                                        "Enter valid username",
-                                        "Enter valid password",
-                                        "Click Login",
+                                        "Verify login page is loaded",
+                                        "Log in as standard_user",
+                                        "Verify inventory page is loaded",
                                     ],
                                     expectedResult: "Inventory page is displayed.",
                                     suggestedPomMethods: [
                                         "LoginPage.open",
+                                        "LoginPage.expectLoaded",
                                         "LoginPage.login",
                                         "InventoryPage.expectLoaded",
                                     ],

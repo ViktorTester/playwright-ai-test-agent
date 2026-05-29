@@ -1,11 +1,12 @@
 import {expect, type Locator, type Page} from "@playwright/test";
+import {step} from "../utils/testStep";
 
 export class LoginPage {
-    readonly page: Page;
-    readonly usernameInput: Locator;
-    readonly passwordInput: Locator;
-    readonly loginButton: Locator;
-    readonly errorMessage: Locator;
+    private readonly page: Page;
+    private readonly usernameInput: Locator;
+    private readonly passwordInput: Locator;
+    private readonly loginButton: Locator;
+    private readonly errorMessage: Locator;
 
     constructor(page: Page) {
         this.page = page;
@@ -15,23 +16,31 @@ export class LoginPage {
         this.errorMessage = page.locator("[data-test='error']");
     }
 
+    @step("Open login page")
     async open(): Promise<void> {
         await this.page.goto("/");
     }
 
-    async login(username: string, password: string): Promise<void> {
-        await this.usernameInput.fill(username);
-        await this.passwordInput.fill(password);
-        await this.loginButton.click();
-    }
-
+    @step("Verify login page is loaded")
     async expectLoaded(): Promise<void> {
         await expect(this.usernameInput).toBeVisible();
         await expect(this.passwordInput).toBeVisible();
         await expect(this.loginButton).toBeVisible();
     }
 
-    async expectErrorMessage(message: string | RegExp): Promise<void> {
-        await expect(this.errorMessage).toContainText(message);
+    @step("Login with username: {0}")
+    async login(username: string, password: string): Promise<void> {
+        await this.usernameInput.fill(username);
+        await this.passwordInput.fill(password);
+        await this.loginButton.click();
+    }
+
+    @step("Verify login error message")
+    async expectErrorMessage(expectedMessage?: string): Promise<void> {
+        await expect(this.errorMessage).toBeVisible();
+
+        if (expectedMessage) {
+            await expect(this.errorMessage).toHaveText(expectedMessage);
+        }
     }
 }

@@ -1,48 +1,48 @@
 import {expect, type Locator, type Page} from "@playwright/test";
+import {step} from "../utils/testStep";
 
 export class InventoryPage {
-    readonly page: Page;
-    readonly title: Locator;
-    readonly cartLink: Locator;
-    readonly menuButton: Locator;
-    readonly logoutLink: Locator;
+    private readonly page: Page;
+    private readonly title: Locator;
+    private readonly cartLink: Locator;
+    private readonly cartBadge: Locator;
 
     constructor(page: Page) {
         this.page = page;
-        this.title = page.locator("[data-test='title']");
+        this.title = page.getByText("Products");
         this.cartLink = page.locator("[data-test='shopping-cart-link']");
-        this.menuButton = page.getByRole("button", {name: "Open Menu"});
-        this.logoutLink = page.locator("[data-test='logout-sidebar-link']");
+        this.cartBadge = page.locator("[data-test='shopping-cart-badge']");
     }
 
+    private productAddButton(productName: string): Locator {
+        return this.page
+            .locator(".inventory_item")
+            .filter({hasText: productName})
+            .getByRole("button", {name: "Add to cart"});
+    }
+
+    @step("Verify inventory page is loaded")
     async expectLoaded(): Promise<void> {
-        await expect(this.page).toHaveURL(/inventory/);
-        await expect(this.title).toHaveText("Products");
+        await expect(this.title).toBeVisible();
     }
 
-    productAddButton(productName: string): Locator {
-        const testId = this.toProductAddButtonTestId(productName);
-        return this.page.locator(`[data-test="${testId}"]`);
+    @step("Verify inventory page is opened")
+    async expectOpened(): Promise<void> {
+        await this.expectLoaded();
     }
 
+    @step("Add product to cart: {0}")
     async addProductToCart(productName: string): Promise<void> {
         await this.productAddButton(productName).click();
     }
 
+    @step("Verify cart badge count: {0}")
+    async expectCartBadgeCount(count: number): Promise<void> {
+        await expect(this.cartBadge).toHaveText(String(count));
+    }
+
+    @step("Open cart")
     async openCart(): Promise<void> {
         await this.cartLink.click();
-    }
-
-    async logout(): Promise<void> {
-        await this.menuButton.click();
-        await this.logoutLink.click();
-    }
-
-    async expectCartBadgeCount(count: number): Promise<void> {
-        await expect(this.page.locator("[data-test='shopping-cart-badge']")).toHaveText(String(count));
-    }
-
-    private toProductAddButtonTestId(productName: string): string {
-        return `add-to-cart-${productName.toLowerCase().replaceAll(" ", "-")}`;
     }
 }

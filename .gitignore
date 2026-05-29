@@ -151,3 +151,5 @@ agent-output/
 
 .DS_Store
 .idea/
+
+._*
