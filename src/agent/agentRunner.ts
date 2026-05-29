@@ -1,8 +1,9 @@
 import "dotenv/config";
-import { analyzeSite } from "./siteAnalyzer";
-import { generateTestCases } from "./testCaseGenerator";
-import { ensureProjectDirectories, writeProjectFile } from "../utils/fileSystem";
-import { runShellCommand } from "../utils/shell";
+import {analyzeSite} from "./siteAnalyzer";
+import {generateTestCases} from "./testCaseGenerator";
+import {generatePlaywrightTestFile} from "./testFileGenerator";
+import {ensureProjectDirectories, writeProjectFile} from "../utils/fileSystem";
+import {runShellCommand} from "../utils/shell";
 
 async function main(): Promise<void> {
     await ensureProjectDirectories();
@@ -26,6 +27,29 @@ async function main(): Promise<void> {
         "agent-output/test-cases/saucedemo-test-cases.json",
         JSON.stringify(testCaseGenerationResult, null, 2),
     );
+
+    console.log("Generating Playwright test file with AI...");
+
+    const generatedTestFile = await generatePlaywrightTestFile(testCaseGenerationResult);
+
+    await writeProjectFile(generatedTestFile.filePath, generatedTestFile.code);
+
+    await writeProjectFile(
+        "agent-output/generated-tests/saucedemo-ai-generated.spec.ts",
+        generatedTestFile.code,
+    );
+
+    console.log("Running TypeScript validation...");
+
+    const typeCheckResult = await runShellCommand("npx", ["tsc", "--noEmit"]);
+
+    console.log("Running generated Playwright tests...");
+
+    const generatedTestRunResult = await runShellCommand("npx", [
+        "playwright",
+        "test",
+        generatedTestFile.filePath,
+    ]);
 
     const playwrightVersion = await runShellCommand("npx", ["playwright", "--version"]);
 
@@ -55,6 +79,18 @@ async function main(): Promise<void> {
             `Smoke: ${testCaseGenerationResult.testCases.filter((testCase) => testCase.type === "smoke").length}`,
             `Regression: ${testCaseGenerationResult.testCases.filter((testCase) => testCase.type === "regression").length}`,
             "",
+            "## Generated test file",
+            "",
+            `Path: ${generatedTestFile.filePath}`,
+            "",
+            "## Validation",
+            "",
+            `TypeScript command: ${typeCheckResult.command}`,
+            `TypeScript exit code: ${typeCheckResult.exitCode}`,
+            "",
+            `Generated test command: ${generatedTestRunResult.command}`,
+            `Generated test exit code: ${generatedTestRunResult.exitCode}`,
+            "",
             "## Tooling",
             "",
             `Playwright: ${playwrightVersion.stdout}`,
@@ -64,7 +100,12 @@ async function main(): Promise<void> {
 
     console.log("Site analysis saved to agent-output/analysis/saucedemo-analysis.json");
     console.log("Test cases saved to agent-output/test-cases/saucedemo-test-cases.json");
+    console.log(`Generated test saved to ${generatedTestFile.filePath}`);
     console.log("Report saved to agent-output/reports/agent-report.md");
+
+    if (typeCheckResult.failed || generatedTestRunResult.failed) {
+        process.exitCode = 1;
+    }
 }
 
 main().catch((error: unknown) => {

@@ -1,4 +1,4 @@
-import { chromium, type Page } from "@playwright/test";
+import {chromium, type Page} from "@playwright/test";
 
 export type PageElementInfo = {
     role?: string;
