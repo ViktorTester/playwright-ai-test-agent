@@ -9,10 +9,14 @@ async function main(): Promise<void> {
     await ensureProjectDirectories();
 
     const baseUrl = process.env.BASE_URL ?? "https://www.saucedemo.com";
+    const analysis = await analyzeSite(baseUrl);
+    const analyzedPagesCount = analysis.pages.length;
+    const totalInputs = analysis.pages.reduce((sum, page) => sum + page.inputs.length, 0);
+    const totalButtons = analysis.pages.reduce((sum, page) => sum + page.buttons.length, 0);
+    const totalLinks = analysis.pages.reduce((sum, page) => sum + page.links.length, 0);
+    const totalForms = analysis.pages.reduce((sum, page) => sum + page.forms.length, 0);
 
     console.log(`Analyzing site: ${baseUrl}`);
-
-    const analysis = await analyzeSite(baseUrl);
 
     await writeProjectFile(
         "agent-output/analysis/saucedemo-analysis.json",
@@ -61,15 +65,14 @@ async function main(): Promise<void> {
             "## Site analysis",
             "",
             `Base URL: ${analysis.baseUrl}`,
-            `Current URL: ${analysis.currentUrl}`,
-            `Page title: ${analysis.pageTitle}`,
+            `Analyzed pages: ${analyzedPagesCount}`,
             "",
             "## Elements found",
             "",
-            `Inputs: ${analysis.inputs.length}`,
-            `Buttons: ${analysis.buttons.length}`,
-            `Links: ${analysis.links.length}`,
-            `Headings: ${analysis.headings.length}`,
+            `Inputs: ${totalInputs}`,
+            `Buttons: ${totalButtons}`,
+            `Links: ${totalLinks}`,
+            `Forms: ${totalForms}`,
             "",
             "## Generated test cases",
             "",
