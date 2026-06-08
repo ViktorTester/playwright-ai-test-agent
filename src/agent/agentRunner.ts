@@ -9,12 +9,27 @@ async function main(): Promise<void> {
     await ensureProjectDirectories();
 
     const baseUrl = process.env.BASE_URL ?? "https://www.saucedemo.com";
-    const analysis = await analyzeSite(baseUrl);
+    const username = process.env.SAUCE_USERNAME;
+    const password = process.env.SAUCE_PASSWORD;
+
+    const analysis = await analyzeSite(baseUrl, {
+        auth:
+            username && password
+                ? {
+                    username,
+                    password,
+                }
+                : undefined,
+    });
+
     const analyzedPagesCount = analysis.pages.length;
     const totalInputs = analysis.pages.reduce((sum, page) => sum + page.inputs.length, 0);
     const totalButtons = analysis.pages.reduce((sum, page) => sum + page.buttons.length, 0);
     const totalLinks = analysis.pages.reduce((sum, page) => sum + page.links.length, 0);
     const totalForms = analysis.pages.reduce((sum, page) => sum + page.forms.length, 0);
+    const pageSummary = analysis.pages
+        .map((page) => `- ${page.pageName}: ${page.url}`)
+        .join("\n");
 
     console.log(`Analyzing site: ${baseUrl}`);
 
@@ -66,6 +81,10 @@ async function main(): Promise<void> {
             "",
             `Base URL: ${analysis.baseUrl}`,
             `Analyzed pages: ${analyzedPagesCount}`,
+            "",
+            "## Pages",
+            "",
+            pageSummary,
             "",
             "## Elements found",
             "",

@@ -36,15 +36,26 @@ export type SiteAnalysisResult = {
     readonly pages: PageAnalysisResult[];
 };
 
+export type SiteAnalyzerOptions = {
+    readonly auth?: {
+        readonly username: string;
+        readonly password: string;
+    };
+};
+
 type RawPageElementInfo = Omit<PageElementInfo, "recommendedLocator">;
 
-export async function analyzeSite(baseUrl: string): Promise<SiteAnalysisResult> {
+export async function analyzeSite(
+    baseUrl: string,
+    options: SiteAnalyzerOptions = {},
+): Promise<SiteAnalysisResult> {
     const browser = await chromium.launch({
         headless: true,
     });
 
     try {
         const page = await browser.newPage();
+        const pages: PageAnalysisResult[] = [];
 
         await page.goto(baseUrl, {
             waitUntil: "domcontentloaded",
@@ -52,12 +63,17 @@ export async function analyzeSite(baseUrl: string): Promise<SiteAnalysisResult> 
 
         await page.waitForLoadState("networkidle");
 
-        const pageAnalysis = await analyzeCurrentPage(page);
+        pages.push(await analyzeCurrentPage(page));
+
+        if (options.auth) {
+            await login(page, options.auth.username, options.auth.password);
+            pages.push(await analyzeCurrentPage(page));
+        }
 
         return {
             baseUrl,
             analyzedAt: new Date().toISOString(),
-            pages: [pageAnalysis],
+            pages,
         };
     } finally {
         await closeBrowser(browser);
@@ -86,6 +102,18 @@ async function analyzeCurrentPage(page: Page): Promise<PageAnalysisResult> {
         forms,
         visibleTexts,
     };
+}
+
+async function login(page: Page, username: string, password: string): Promise<void> {
+    await page.getByPlaceholder("Username").fill(username);
+    await page.getByPlaceholder("Password").fill(password);
+    await page.getByRole("button", {name: "Login"}).click();
+
+    await page.waitForURL(/inventory\.html/, {
+        timeout: 10_000,
+    });
+
+    await page.waitForLoadState("networkidle");
 }
 
 async function collectHeadings(page: Page): Promise<string[]> {
@@ -227,11 +255,15 @@ function inferPageName(url: string, title: string, headings: string[]): string {
     const normalizedTitle = title.toLowerCase();
     const headingText = headings.join(" ").toLowerCase();
 
-    if (normalizedUrl.includes("cart") || headingText.includes("cart")) {
+    if (normalizedUrl.includes("inventory")) {
+        return "Inventory page";
+    }
+
+    if (normalizedUrl.includes("cart")) {
         return "Cart page";
     }
 
-    if (normalizedUrl.includes("checkout") || headingText.includes("checkout")) {
+    if (normalizedUrl.includes("checkout")) {
         return "Checkout page";
     }
 
@@ -239,8 +271,20 @@ function inferPageName(url: string, title: string, headings: string[]): string {
         return "Inventory page";
     }
 
-    if (normalizedTitle.includes("swag labs")) {
+    if (headingText.includes("cart")) {
+        return "Cart page";
+    }
+
+    if (headingText.includes("checkout")) {
+        return "Checkout page";
+    }
+
+    if (normalizedUrl === "https://www.saucedemo.com/" || normalizedUrl.endsWith("saucedemo.com")) {
         return "Login page";
+    }
+
+    if (normalizedTitle.includes("swag labs")) {
+        return "Unknown SauceDemo page";
     }
 
     return "Unknown page";
