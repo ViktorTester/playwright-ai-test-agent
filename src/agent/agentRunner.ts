@@ -4,6 +4,7 @@ import {generateTestCases} from "./testCaseGenerator";
 import {generatePlaywrightTestFile} from "./testFileGenerator";
 import {ensureProjectDirectories, writeProjectFile} from "../utils/fileSystem";
 import {runShellCommand} from "../utils/shell";
+import {validatePomContract} from "./validators/pomContractValidator";
 
 async function main(): Promise<void> {
     await ensureProjectDirectories();
@@ -22,6 +23,8 @@ async function main(): Promise<void> {
                 : undefined,
     });
 
+    const pomContract = validatePomContract(analysis);
+
     const analyzedPagesCount = analysis.pages.length;
     const totalInputs = analysis.pages.reduce((sum, page) => sum + page.inputs.length, 0);
     const totalButtons = analysis.pages.reduce((sum, page) => sum + page.buttons.length, 0);
@@ -36,6 +39,11 @@ async function main(): Promise<void> {
     await writeProjectFile(
         "agent-output/analysis/saucedemo-analysis.json",
         JSON.stringify(analysis, null, 2),
+    );
+
+    await writeProjectFile(
+        "agent-output/validation/pom-contract-validation.json",
+        JSON.stringify(pomContract, null, 2),
     );
 
     console.log("Generating test cases with AI...");
@@ -72,6 +80,18 @@ async function main(): Promise<void> {
 
     const playwrightVersion = await runShellCommand("npx", ["playwright", "--version"]);
 
+    const pomContractSummary = pomContract.checkedMethods
+        .map((method) => {
+            const status = method.exists ? "OK" : "MISSING";
+
+            return `- ${status}: ${method.pomMethod} -> ${method.filePath}`;
+        })
+        .join("\n");
+
+    const flowSummary = analysis.flowGraph.actions
+        .map((action) => `- ${action.fromPage} -> ${action.toPage}: ${action.pomMethod}`)
+        .join("\n");
+
     await writeProjectFile(
         "agent-output/reports/agent-report.md",
         [
@@ -85,6 +105,16 @@ async function main(): Promise<void> {
             "## Pages",
             "",
             pageSummary,
+            "",
+            "## Flow graph",
+            "",
+            flowSummary,
+            "",
+            "## POM contract validation",
+            "",
+            `Status: ${pomContract.isValid ? "PASSED" : "FAILED"}`,
+            "",
+            pomContractSummary,
             "",
             "## Elements found",
             "",

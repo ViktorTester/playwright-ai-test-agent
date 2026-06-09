@@ -34,6 +34,7 @@ export type SiteAnalysisResult = {
     readonly baseUrl: string;
     readonly analyzedAt: string;
     readonly pages: PageAnalysisResult[];
+    readonly flowGraph: SiteFlowGraph;
 };
 
 export type SiteAnalyzerOptions = {
@@ -41,6 +42,18 @@ export type SiteAnalyzerOptions = {
         readonly username: string;
         readonly password: string;
     };
+};
+
+export type SiteFlowAction = {
+    readonly fromPage: string;
+    readonly toPage: string;
+    readonly actionName: string;
+    readonly pomMethod: string;
+    readonly description: string;
+};
+
+export type SiteFlowGraph = {
+    readonly actions: SiteFlowAction[];
 };
 
 type RawPageElementInfo = Omit<PageElementInfo, "recommendedLocator">;
@@ -74,6 +87,7 @@ export async function analyzeSite(
             baseUrl,
             analyzedAt: new Date().toISOString(),
             pages,
+            flowGraph: buildFlowGraph(),
         };
     } finally {
         await closeBrowser(browser);
@@ -288,6 +302,48 @@ function inferPageName(url: string, title: string, headings: string[]): string {
     }
 
     return "Unknown page";
+}
+
+function buildFlowGraph(): SiteFlowGraph {
+    return {
+        actions: [
+            {
+                fromPage: "Login page",
+                toPage: "Inventory page",
+                actionName: "login as standard user",
+                pomMethod: "loginPage.login(username, password)",
+                description: "Logs in with valid credentials and opens inventory page.",
+            },
+            {
+                fromPage: "Inventory page",
+                toPage: "Cart page",
+                actionName: "open cart",
+                pomMethod: "inventoryPage.openCart()",
+                description: "Opens the shopping cart from the inventory page.",
+            },
+            {
+                fromPage: "Cart page",
+                toPage: "Checkout step one page",
+                actionName: "start checkout",
+                pomMethod: "cartPage.checkout()",
+                description: "Starts checkout from the cart page.",
+            },
+            {
+                fromPage: "Checkout step one page",
+                toPage: "Checkout step two page",
+                actionName: "continue checkout",
+                pomMethod: "checkoutPage.fillCustomerInformation(firstName, lastName, postalCode)",
+                description: "Submits customer information and opens checkout overview.",
+            },
+            {
+                fromPage: "Checkout step two page",
+                toPage: "Checkout complete page",
+                actionName: "finish checkout",
+                pomMethod: "checkoutPage.finish()",
+                description: "Finishes checkout and opens confirmation page.",
+            },
+        ],
+    };
 }
 
 async function closeBrowser(browser: Browser): Promise<void> {
