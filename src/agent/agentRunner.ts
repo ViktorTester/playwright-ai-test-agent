@@ -13,6 +13,8 @@ async function main(): Promise<void> {
     const username = process.env.SAUCE_USERNAME;
     const password = process.env.SAUCE_PASSWORD;
 
+    console.log(`Analyzing site: ${baseUrl}`);
+
     const analysis = await analyzeSite(baseUrl, {
         auth:
             username && password
@@ -21,7 +23,10 @@ async function main(): Promise<void> {
                     password,
                 }
                 : undefined,
+        maxPages: Number(process.env.SITE_ANALYZER_MAX_PAGES ?? 10),
     });
+
+    console.log(`Analyzing site: ${baseUrl}`);
 
     const pomContract = validatePomContract(analysis);
 
@@ -33,8 +38,6 @@ async function main(): Promise<void> {
     const pageSummary = analysis.pages
         .map((page) => `- ${page.pageName}: ${page.url}`)
         .join("\n");
-
-    console.log(`Analyzing site: ${baseUrl}`);
 
     await writeProjectFile(
         "agent-output/analysis/saucedemo-analysis.json",

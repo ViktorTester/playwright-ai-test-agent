@@ -1,4 +1,4 @@
-import {chromium, type Browser, type Locator, type Page} from "@playwright/test";
+import {chromium, type Browser, type Locator, type Page, type BrowserContext} from "@playwright/test";
 
 export type PageElementInfo = {
     readonly tagName: string;
@@ -42,6 +42,7 @@ export type SiteAnalyzerOptions = {
         readonly username: string;
         readonly password: string;
     };
+    readonly maxPages?: number;
 };
 
 export type SiteFlowAction = {
@@ -56,6 +57,13 @@ export type SiteFlowGraph = {
     readonly actions: SiteFlowAction[];
 };
 
+type ClickCandidate = {
+    readonly sourcePageUrl: string;
+    readonly sourcePageName: string;
+    readonly locator: string;
+    readonly description: string;
+};
+
 type RawPageElementInfo = Omit<PageElementInfo, "recommendedLocator">;
 
 export async function analyzeSite(
@@ -67,21 +75,83 @@ export async function analyzeSite(
     });
 
     try {
-        const page = await browser.newPage();
+        const context = await browser.newContext();
+
+        context.setDefaultTimeout(5_000);
+        context.setDefaultNavigationTimeout(10_000);
+
+        const page = await context.newPage();
         const pages: PageAnalysisResult[] = [];
+        const visitedUrls = new Set<string>();
+        const urlsToVisit: string[] = [];
+        const maxPages = options.maxPages ?? 10;
+
+        console.log(`[site-analyzer] Max pages: ${maxPages}`);
 
         await page.goto(baseUrl, {
             waitUntil: "domcontentloaded",
         });
 
-        await page.waitForLoadState("networkidle");
+        await waitForPageReady(page);
 
-        pages.push(await analyzeCurrentPage(page));
+        const loginPageAnalysis = await analyzeCurrentPage(page);
+        pages.push(loginPageAnalysis);
+        visitedUrls.add(normalizeUrl(page.url()));
+
+        console.log(`[site-analyzer] Analyzed page: ${loginPageAnalysis.pageName} - ${loginPageAnalysis.url}`);
 
         if (options.auth) {
             await login(page, options.auth.username, options.auth.password);
-            pages.push(await analyzeCurrentPage(page));
+
+            const authenticatedPageAnalysis = await analyzeCurrentPage(page);
+            pages.push(authenticatedPageAnalysis);
+            visitedUrls.add(normalizeUrl(page.url()));
         }
+
+        urlsToVisit.push(...collectInternalUrlsFromPages(pages, baseUrl));
+
+        while (urlsToVisit.length > 0 && pages.length < maxPages) {
+            const nextUrl = urlsToVisit.shift();
+
+            if (!nextUrl) {
+                continue;
+            }
+
+            const normalizedUrl = normalizeUrl(nextUrl);
+
+            if (visitedUrls.has(normalizedUrl)) {
+                continue;
+            }
+
+            visitedUrls.add(normalizedUrl);
+
+            await page.goto(nextUrl, {
+                waitUntil: "domcontentloaded",
+            });
+
+            await waitForPageReady(page);
+
+            const analyzedPage = await analyzeCurrentPage(page);
+            pages.push(analyzedPage);
+
+            urlsToVisit.push(...collectInternalUrlsFromPages([analyzedPage], baseUrl));
+        }
+
+        console.log("[site-analyzer] Starting safe click discovery...");
+
+        const discoveredByClicks = await discoverPagesBySafeClicks(
+            browser,
+            context,
+            pages,
+            baseUrl,
+            options.auth,
+            visitedUrls,
+            maxPages,
+        );
+
+        console.log(`[site-analyzer] Click discovery completed. New pages: ${discoveredByClicks.length}`);
+
+        pages.push(...discoveredByClicks);
 
         return {
             baseUrl,
@@ -127,7 +197,9 @@ async function login(page: Page, username: string, password: string): Promise<vo
         timeout: 10_000,
     });
 
-    await page.waitForLoadState("networkidle");
+    await page.waitForLoadState("domcontentloaded", {
+        timeout: 5_000,
+    });
 }
 
 async function collectHeadings(page: Page): Promise<string[]> {
@@ -304,6 +376,270 @@ function inferPageName(url: string, title: string, headings: string[]): string {
     return "Unknown page";
 }
 
+async function discoverPagesBySafeClicks(
+    browser: Browser,
+    authenticatedContext: BrowserContext,
+    analyzedPages: PageAnalysisResult[],
+    baseUrl: string,
+    auth: SiteAnalyzerOptions["auth"],
+    visitedUrls: Set<string>,
+    maxPages: number,
+): Promise<PageAnalysisResult[]> {
+    const discoveredPages: PageAnalysisResult[] = [];
+    const storageState = await authenticatedContext.storageState();
+
+    for (const analyzedPage of analyzedPages) {
+        if (visitedUrls.size + discoveredPages.length >= maxPages) {
+            break;
+        }
+
+        const candidates = collectSafeClickCandidates(analyzedPage);
+
+        for (const candidate of candidates) {
+            if (visitedUrls.size + discoveredPages.length >= maxPages) {
+                break;
+            }
+
+            const clickContext = await browser.newContext({
+                storageState,
+            });
+
+            clickContext.setDefaultTimeout(5_000);
+            clickContext.setDefaultNavigationTimeout(10_000);
+
+            const clickPage = await clickContext.newPage();
+
+            try {
+                await clickPage.goto(candidate.sourcePageUrl, {
+                    waitUntil: "domcontentloaded",
+                });
+
+                await waitForPageReady(clickPage);
+
+                if (auth && isLoginPage(clickPage.url())) {
+                    await login(clickPage, auth.username, auth.password);
+
+                    await clickPage.goto(candidate.sourcePageUrl, {
+                        waitUntil: "domcontentloaded",
+                    });
+
+                    await waitForPageReady(clickPage);
+                }
+
+                await clickByRecommendedLocator(clickPage, candidate.locator);
+
+                await clickPage.waitForLoadState("domcontentloaded");
+
+                const currentUrl = normalizeUrl(clickPage.url());
+
+                if (visitedUrls.has(currentUrl)) {
+                    continue;
+                }
+
+                if (!isInternalSafeUrl(currentUrl, baseUrl)) {
+                    continue;
+                }
+
+                visitedUrls.add(currentUrl);
+
+                const analyzedDiscoveredPage = await analyzeCurrentPage(clickPage);
+                discoveredPages.push(analyzedDiscoveredPage);
+            } catch {
+                // Ignore unstable or non-navigation click candidates.
+            } finally {
+                await clickContext.close();
+            }
+        }
+    }
+
+    return discoveredPages;
+}
+
+function collectSafeClickCandidates(page: PageAnalysisResult): ClickCandidate[] {
+    const candidates: ClickCandidate[] = [];
+    const elements = [...page.links, ...page.buttons];
+
+    for (const element of elements) {
+        if (!element.isVisible || !element.recommendedLocator) {
+            continue;
+        }
+
+        const candidateText = [
+            element.text,
+            element.testId,
+            element.name,
+            element.type,
+            element.recommendedLocator,
+        ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+
+        if (!isSafeNavigationCandidate(candidateText)) {
+            continue;
+        }
+
+        candidates.push({
+            sourcePageUrl: page.url,
+            sourcePageName: page.pageName,
+            locator: element.recommendedLocator,
+            description: candidateText,
+        });
+    }
+
+    return candidates;
+}
+
+function isSafeNavigationCandidate(candidateText: string): boolean {
+    const blockedKeywords = [
+        "logout",
+        "reset",
+        "delete",
+        "remove",
+        "cancel",
+        "finish",
+        "complete",
+        "facebook",
+        "twitter",
+        "linkedin",
+    ];
+
+    if (blockedKeywords.some((keyword) => candidateText.includes(keyword))) {
+        return false;
+    }
+
+    const allowedKeywords = [
+        "cart",
+        "checkout",
+        "continue",
+        "back",
+        "all items",
+        "item",
+        "details",
+        "overview",
+    ];
+
+    return allowedKeywords.some((keyword) => candidateText.includes(keyword));
+}
+
+async function clickByRecommendedLocator(page: Page, recommendedLocator: string): Promise<void> {
+    if (recommendedLocator.startsWith("page.getByTestId(")) {
+        const testId = extractLocatorArgument(recommendedLocator);
+
+        await page.getByTestId(testId).click({
+            timeout: 3_000,
+        });
+
+        return;
+    }
+
+    if (recommendedLocator.startsWith("page.getByRole(\"link\"")) {
+        const name = extractRoleName(recommendedLocator);
+
+        await page.getByRole("link", {name}).click({
+            timeout: 3_000,
+        });
+
+        return;
+    }
+
+    if (recommendedLocator.startsWith("page.getByRole(\"button\"")) {
+        const name = extractRoleName(recommendedLocator);
+
+        await page.getByRole("button", {name}).click({
+            timeout: 3_000,
+        });
+
+        return;
+    }
+
+    throw new Error(`Unsupported click locator: ${recommendedLocator}`);
+}
+
+function extractLocatorArgument(recommendedLocator: string): string {
+    const match = recommendedLocator.match(/\("([^"]+)"\)/);
+
+    if (!match?.[1]) {
+        throw new Error(`Cannot extract locator argument from: ${recommendedLocator}`);
+    }
+
+    return match[1];
+}
+
+function extractRoleName(recommendedLocator: string): string {
+    const match = recommendedLocator.match(/name:\s*"([^"]+)"/);
+
+    if (!match?.[1]) {
+        throw new Error(`Cannot extract role name from: ${recommendedLocator}`);
+    }
+
+    return match[1];
+}
+
+function isLoginPage(url: string): boolean {
+    const normalizedUrl = url.toLowerCase();
+
+    return normalizedUrl === "https://www.saucedemo.com/" || normalizedUrl.endsWith("saucedemo.com/");
+}
+
+function collectInternalUrlsFromPages(
+    pages: PageAnalysisResult[],
+    baseUrl: string,
+): string[] {
+    const urls = new Set<string>();
+
+    for (const page of pages) {
+        for (const link of page.links) {
+            if (!link.href) {
+                continue;
+            }
+
+            if (!isInternalSafeUrl(link.href, baseUrl)) {
+                continue;
+            }
+
+            urls.add(normalizeUrl(link.href));
+        }
+    }
+
+    return [...urls];
+}
+
+function isInternalSafeUrl(url: string, baseUrl: string): boolean {
+    try {
+        const candidate = new URL(url);
+        const base = new URL(baseUrl);
+
+        if (candidate.origin !== base.origin) {
+            return false;
+        }
+
+        const blockedPatterns = [
+            "logout",
+            "reset",
+            "delete",
+            "remove",
+            "facebook",
+            "twitter",
+            "linkedin",
+        ];
+
+        return !blockedPatterns.some((pattern) =>
+            candidate.href.toLowerCase().includes(pattern),
+        );
+    } catch {
+        return false;
+    }
+}
+
+function normalizeUrl(url: string): string {
+    const parsedUrl = new URL(url);
+
+    parsedUrl.hash = "";
+
+    return parsedUrl.toString();
+}
+
 function buildFlowGraph(): SiteFlowGraph {
     return {
         actions: [
@@ -344,6 +680,14 @@ function buildFlowGraph(): SiteFlowGraph {
             },
         ],
     };
+}
+
+async function waitForPageReady(page: Page): Promise<void> {
+    await page.waitForLoadState("domcontentloaded", {
+        timeout: 5_000,
+    }).catch(() => {
+        // Analyzer should not fail only because the page did not reach a perfect load state.
+    });
 }
 
 async function closeBrowser(browser: Browser): Promise<void> {
