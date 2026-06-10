@@ -1,155 +1,255 @@
-import {chromium, type Browser, type Locator, type Page} from "@playwright/test";
+import {chromium, type Browser, type Page} from "@playwright/test";
 
 export type PageElementInfo = {
-    readonly tagName: string;
-    readonly text?: string;
-    readonly role?: string;
-    readonly placeholder?: string;
-    readonly testId?: string;
-    readonly name?: string;
-    readonly type?: string;
-    readonly href?: string;
-    readonly isVisible: boolean;
-    readonly recommendedLocator?: string;
+    role?: string;
+    text?: string;
+    placeholder?: string;
+    testId?: string;
+    href?: string;
+    tagName: string;
+    isVisible: boolean;
 };
 
-export type PageFormInfo = {
-    readonly inputs: PageElementInfo[];
-    readonly buttons: PageElementInfo[];
-};
-
-export type PageAnalysisResult = {
-    readonly pageName: string;
-    readonly url: string;
-    readonly title: string;
-    readonly headings: string[];
-    readonly inputs: PageElementInfo[];
-    readonly buttons: PageElementInfo[];
-    readonly links: PageElementInfo[];
-    readonly forms: PageFormInfo[];
-    readonly visibleTexts: string[];
+export type AnalyzedPage = {
+    url: string;
+    title: string;
+    headings: string[];
+    inputs: PageElementInfo[];
+    buttons: PageElementInfo[];
+    links: PageElementInfo[];
+    visibleTexts: string[];
 };
 
 export type SiteAnalysisResult = {
-    readonly baseUrl: string;
-    readonly analyzedAt: string;
-    readonly pages: PageAnalysisResult[];
-    readonly flowGraph: SiteFlowGraph;
+    baseUrl: string;
+    pages: AnalyzedPage[];
+    transitions: SiteTransition[];
 };
 
-export type SiteAnalyzerOptions = {
-    readonly auth?: {
-        readonly username: string;
-        readonly password: string;
-    };
+export type SiteTransition = {
+    fromUrl: string;
+    toUrl: string;
+    actionText?: string;
+    actionTestId?: string;
 };
 
-export type SiteFlowAction = {
-    readonly fromPage: string;
-    readonly toPage: string;
-    readonly actionName: string;
-    readonly pomMethod: string;
-    readonly description: string;
-};
+const DEFAULT_MAX_PAGES = 10;
 
-export type SiteFlowGraph = {
-    readonly actions: SiteFlowAction[];
-};
-
-type RawPageElementInfo = Omit<PageElementInfo, "recommendedLocator">;
-
-export async function analyzeSite(
-    baseUrl: string,
-    options: SiteAnalyzerOptions = {},
-): Promise<SiteAnalysisResult> {
-    const browser = await chromium.launch({
-        headless: true,
-    });
+export async function analyzeSite(baseUrl: string): Promise<SiteAnalysisResult> {
+    const browser = await chromium.launch({headless: true});
+    const maxPages = Number(process.env.MAX_ANALYZED_PAGES ?? DEFAULT_MAX_PAGES);
 
     try {
         const page = await browser.newPage();
-        const pages: PageAnalysisResult[] = [];
+        await openAndAuthenticate(page, baseUrl);
 
-        await page.goto(baseUrl, {
-            waitUntil: "domcontentloaded",
-        });
+        const pages = new Map<string, AnalyzedPage>();
+        const transitions: SiteTransition[] = [];
+        const queue: string[] = [normalizeUrl(page.url())];
 
-        await page.waitForLoadState("networkidle");
+        while (queue.length > 0 && pages.size < maxPages) {
+            const currentUrl = queue.shift();
 
-        pages.push(await analyzeCurrentPage(page));
+            if (!currentUrl || pages.has(currentUrl)) {
+                continue;
+            }
 
-        if (options.auth) {
-            await login(page, options.auth.username, options.auth.password);
-            pages.push(await analyzeCurrentPage(page));
+            await page.goto(currentUrl, {waitUntil: "domcontentloaded"});
+            await page.waitForLoadState("networkidle").catch(() => undefined);
+
+            const analyzedPage = await analyzeCurrentPage(page);
+            pages.set(currentUrl, analyzedPage);
+
+            const safeLinks = analyzedPage.links
+                .filter((link) => link.href)
+                .map((link) => normalizeUrl(link.href as string))
+                .filter((href) => isSameOrigin(baseUrl, href))
+                .filter((href) => !pages.has(href))
+                .filter((href) => !queue.includes(href));
+
+            queue.push(...safeLinks);
+
+            const clickTransitions = await discoverSafeClickTransitions(browser, baseUrl, currentUrl);
+            transitions.push(...clickTransitions);
+
+            for (const transition of clickTransitions) {
+                const targetUrl = normalizeUrl(transition.toUrl);
+
+                if (!pages.has(targetUrl) && !queue.includes(targetUrl) && pages.size + queue.length < maxPages) {
+                    queue.push(targetUrl);
+                }
+            }
         }
 
         return {
             baseUrl,
-            analyzedAt: new Date().toISOString(),
-            pages,
-            flowGraph: buildFlowGraph(),
+            pages: [...pages.values()],
+            transitions,
         };
     } finally {
-        await closeBrowser(browser);
+        await browser.close();
     }
 }
 
-async function analyzeCurrentPage(page: Page): Promise<PageAnalysisResult> {
-    const [title, headings, inputs, buttons, links, forms, visibleTexts] = await Promise.all([
-        page.title(),
-        collectHeadings(page),
-        collectInputs(page),
-        collectButtons(page),
-        collectLinks(page),
-        collectForms(page),
-        collectVisibleTexts(page),
-    ]);
+async function openAndAuthenticate(page: Page, baseUrl: string): Promise<void> {
+    await page.goto(baseUrl, {waitUntil: "domcontentloaded"});
+    await page.waitForLoadState("networkidle").catch(() => undefined);
 
+    const username = process.env.SITE_USERNAME ?? "standard_user";
+    const password = process.env.SITE_PASSWORD ?? "secret_sauce";
+
+    const usernameInput = page.getByPlaceholder("Username");
+    const passwordInput = page.getByPlaceholder("Password");
+    const loginButton = page.getByRole("button", {name: "Login"});
+
+    if (await usernameInput.isVisible().catch(() => false)) {
+        await usernameInput.fill(username);
+        await passwordInput.fill(password);
+        await loginButton.click();
+        await page.waitForLoadState("networkidle").catch(() => undefined);
+    }
+}
+
+async function analyzeCurrentPage(page: Page): Promise<AnalyzedPage> {
     return {
-        pageName: inferPageName(page.url(), title, headings),
-        url: page.url(),
-        title,
-        headings,
-        inputs,
-        buttons,
-        links,
-        forms,
-        visibleTexts,
+        url: normalizeUrl(page.url()),
+        title: await page.title(),
+        headings: await collectHeadings(page),
+        inputs: await collectInputs(page),
+        buttons: await collectButtons(page),
+        links: await collectLinks(page),
+        visibleTexts: await collectVisibleTexts(page),
     };
 }
 
-async function login(page: Page, username: string, password: string): Promise<void> {
-    await page.getByPlaceholder("Username").fill(username);
-    await page.getByPlaceholder("Password").fill(password);
-    await page.getByRole("button", {name: "Login"}).click();
+async function discoverSafeClickTransitions(
+    browser: Browser,
+    baseUrl: string,
+    sourceUrl: string,
+): Promise<SiteTransition[]> {
+    const page = await browser.newPage();
+    const transitions: SiteTransition[] = [];
 
-    await page.waitForURL(/inventory\.html/, {
-        timeout: 10_000,
-    });
+    try {
+        await openAndAuthenticate(page, baseUrl);
+        await page.goto(sourceUrl, {waitUntil: "domcontentloaded"});
+        await page.waitForLoadState("networkidle").catch(() => undefined);
 
-    await page.waitForLoadState("networkidle");
+        const clickableElements = await collectSafeClickableElements(page);
+
+        for (const clickableElement of clickableElements) {
+            await page.goto(sourceUrl, {waitUntil: "domcontentloaded"});
+            await page.waitForLoadState("networkidle").catch(() => undefined);
+
+            const locator = clickableElement.testId
+                ? page.locator(`[data-test="${clickableElement.testId}"]`)
+                : page.getByText(clickableElement.text ?? "", {exact: true});
+
+            const beforeUrl = normalizeUrl(page.url());
+
+            await locator.first().click({timeout: 3_000}).catch(() => undefined);
+            await page.waitForLoadState("networkidle").catch(() => undefined);
+
+            const afterUrl = normalizeUrl(page.url());
+
+            if (beforeUrl !== afterUrl && isSameOrigin(baseUrl, afterUrl)) {
+                transitions.push({
+                    fromUrl: beforeUrl,
+                    toUrl: afterUrl,
+                    actionText: clickableElement.text,
+                    actionTestId: clickableElement.testId,
+                });
+            }
+        }
+    } finally {
+        await page.close();
+    }
+
+    return transitions;
+}
+
+async function collectSafeClickableElements(page: Page): Promise<PageElementInfo[]> {
+    const buttons = await collectButtons(page);
+    const links = await collectLinks(page);
+
+    return [...buttons, ...links]
+        .filter((element) => element.isVisible)
+        .filter((element) => !isDangerousAction(element))
+        .slice(0, 20);
+}
+
+function isDangerousAction(element: PageElementInfo): boolean {
+    const value = `${element.text ?? ""} ${element.testId ?? ""}`.toLowerCase();
+
+    return [
+        "logout",
+        "reset",
+        "remove",
+        "delete",
+        "cancel",
+        "finish",
+        "checkout",
+    ].some((dangerousWord) => value.includes(dangerousWord));
 }
 
 async function collectHeadings(page: Page): Promise<string[]> {
-    return page
-        .locator("h1, h2, h3")
-        .evaluateAll((elements) =>
-            elements
-                .map((element) => element.textContent?.trim() ?? "")
-                .filter(Boolean),
-        );
+    return page.locator("h1, h2, h3").evaluateAll((elements) =>
+        elements
+            .map((element) => element.textContent?.trim() ?? "")
+            .filter(Boolean),
+    );
 }
 
 async function collectInputs(page: Page): Promise<PageElementInfo[]> {
-    return collectElementInfo(page.locator("input, textarea, select"));
+    return page.locator("input").evaluateAll((elements) =>
+        elements.map((element) => {
+            const input = element as HTMLInputElement;
+
+            return {
+                tagName: input.tagName.toLowerCase(),
+                placeholder: input.getAttribute("placeholder") ?? undefined,
+                testId: input.getAttribute("data-test") ?? undefined,
+                text: input.value || undefined,
+                isVisible: isElementVisible(input),
+            };
+        }),
+    );
 }
 
 async function collectButtons(page: Page): Promise<PageElementInfo[]> {
-    return collectElementInfo(page.locator("button, input[type='submit'], input[type='button']"));
+    return page.locator("button, input[type='submit'], input[type='button']").evaluateAll((elements) =>
+        elements.map((element) => {
+            const htmlElement = element as HTMLElement;
+            const inputElement = element as HTMLInputElement;
+
+            return {
+                tagName: htmlElement.tagName.toLowerCase(),
+                text:
+                    htmlElement.innerText?.trim() ||
+                    inputElement.value ||
+                    htmlElement.getAttribute("aria-label") ||
+                    undefined,
+                testId: htmlElement.getAttribute("data-test") ?? undefined,
+                isVisible: isElementVisible(htmlElement),
+            };
+        }),
+    );
 }
 
 async function collectLinks(page: Page): Promise<PageElementInfo[]> {
-    return collectElementInfo(page.locator("a"));
+    return page.locator("a").evaluateAll((elements) =>
+        elements.map((element) => {
+            const link = element as HTMLAnchorElement;
+
+            return {
+                tagName: link.tagName.toLowerCase(),
+                text: link.innerText?.trim() || undefined,
+                href: link.href || undefined,
+                testId: link.getAttribute("data-test") ?? undefined,
+                isVisible: isElementVisible(link),
+            };
+        }),
+    );
 }
 
 async function collectVisibleTexts(page: Page): Promise<string[]> {
@@ -162,190 +262,28 @@ async function collectVisibleTexts(page: Page): Promise<string[]> {
             .filter(Boolean);
     });
 
-    return [...new Set(texts)].slice(0, 100);
+    return [...new Set(texts)].slice(0, 80);
 }
 
-async function collectForms(page: Page): Promise<PageFormInfo[]> {
-    const formsCount = await page.locator("form").count();
-    const forms: PageFormInfo[] = [];
+function isElementVisible(element: HTMLElement): boolean {
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
 
-    for (let index = 0; index < formsCount; index++) {
-        const form = page.locator("form").nth(index);
-
-        forms.push({
-            inputs: await collectElementInfo(form.locator("input, textarea, select")),
-            buttons: await collectElementInfo(
-                form.locator("button, input[type='submit'], input[type='button']"),
-            ),
-        });
-    }
-
-    return forms;
-}
-
-async function collectElementInfo(locator: Locator): Promise<PageElementInfo[]> {
-    const elements = await locator.evaluateAll((elementHandles) =>
-        elementHandles.map((element) => {
-            const htmlElement = element as HTMLElement;
-            const inputElement = element as HTMLInputElement;
-            const anchorElement = element as HTMLAnchorElement;
-
-            const style = window.getComputedStyle(htmlElement);
-            const rect = htmlElement.getBoundingClientRect();
-
-            const isVisible =
-                style.visibility !== "hidden" &&
-                style.display !== "none" &&
-                rect.width > 0 &&
-                rect.height > 0;
-
-            return {
-                tagName: htmlElement.tagName.toLowerCase(),
-                text:
-                    htmlElement.innerText?.trim() ||
-                    inputElement.value ||
-                    htmlElement.getAttribute("aria-label") ||
-                    htmlElement.getAttribute("placeholder") ||
-                    undefined,
-                role: htmlElement.getAttribute("role") ?? undefined,
-                placeholder: htmlElement.getAttribute("placeholder") ?? undefined,
-                testId: htmlElement.getAttribute("data-test") ?? undefined,
-                name: htmlElement.getAttribute("name") ?? undefined,
-                type: htmlElement.getAttribute("type") ?? undefined,
-                href: anchorElement.href || undefined,
-                isVisible,
-            };
-        }),
+    return (
+        style.visibility !== "hidden" &&
+        style.display !== "none" &&
+        rect.width > 0 &&
+        rect.height > 0
     );
-
-    return elements.map(addRecommendedLocator);
 }
 
-function addRecommendedLocator(element: RawPageElementInfo): PageElementInfo {
-    return {
-        ...element,
-        recommendedLocator: buildRecommendedLocator({
-            tagName: element.tagName,
-            text: element.text,
-            placeholder: element.placeholder,
-            testId: element.testId,
-            name: element.name,
-        }),
-    };
+function normalizeUrl(url: string): string {
+    const normalizedUrl = new URL(url);
+    normalizedUrl.hash = "";
+
+    return normalizedUrl.toString();
 }
 
-function buildRecommendedLocator(element: {
-    readonly tagName: string;
-    readonly text?: string;
-    readonly placeholder?: string;
-    readonly testId?: string;
-    readonly name?: string;
-}): string | undefined {
-    if (element.testId) {
-        return `page.getByTestId("${element.testId}")`;
-    }
-
-    if (element.placeholder) {
-        return `page.getByPlaceholder("${element.placeholder}")`;
-    }
-
-    if (element.tagName === "button" && element.text) {
-        return `page.getByRole("button", {name: "${element.text}"})`;
-    }
-
-    if (element.tagName === "a" && element.text) {
-        return `page.getByRole("link", {name: "${element.text}"})`;
-    }
-
-    if (element.name) {
-        return `page.locator("[name='${element.name}']")`;
-    }
-
-    return undefined;
-}
-
-function inferPageName(url: string, title: string, headings: string[]): string {
-    const normalizedUrl = url.toLowerCase();
-    const normalizedTitle = title.toLowerCase();
-    const headingText = headings.join(" ").toLowerCase();
-
-    if (normalizedUrl.includes("inventory")) {
-        return "Inventory page";
-    }
-
-    if (normalizedUrl.includes("cart")) {
-        return "Cart page";
-    }
-
-    if (normalizedUrl.includes("checkout")) {
-        return "Checkout page";
-    }
-
-    if (headingText.includes("products")) {
-        return "Inventory page";
-    }
-
-    if (headingText.includes("cart")) {
-        return "Cart page";
-    }
-
-    if (headingText.includes("checkout")) {
-        return "Checkout page";
-    }
-
-    if (normalizedUrl === "https://www.saucedemo.com/" || normalizedUrl.endsWith("saucedemo.com")) {
-        return "Login page";
-    }
-
-    if (normalizedTitle.includes("swag labs")) {
-        return "Unknown SauceDemo page";
-    }
-
-    return "Unknown page";
-}
-
-function buildFlowGraph(): SiteFlowGraph {
-    return {
-        actions: [
-            {
-                fromPage: "Login page",
-                toPage: "Inventory page",
-                actionName: "login as standard user",
-                pomMethod: "loginPage.login(username, password)",
-                description: "Logs in with valid credentials and opens inventory page.",
-            },
-            {
-                fromPage: "Inventory page",
-                toPage: "Cart page",
-                actionName: "open cart",
-                pomMethod: "inventoryPage.openCart()",
-                description: "Opens the shopping cart from the inventory page.",
-            },
-            {
-                fromPage: "Cart page",
-                toPage: "Checkout step one page",
-                actionName: "start checkout",
-                pomMethod: "cartPage.checkout()",
-                description: "Starts checkout from the cart page.",
-            },
-            {
-                fromPage: "Checkout step one page",
-                toPage: "Checkout step two page",
-                actionName: "continue checkout",
-                pomMethod: "checkoutPage.fillCustomerInformation(firstName, lastName, postalCode)",
-                description: "Submits customer information and opens checkout overview.",
-            },
-            {
-                fromPage: "Checkout step two page",
-                toPage: "Checkout complete page",
-                actionName: "finish checkout",
-                pomMethod: "checkoutPage.finish()",
-                description: "Finishes checkout and opens confirmation page.",
-            },
-        ],
-    };
-}
-
-async function closeBrowser(browser: Browser): Promise<void> {
-    await browser.close();
+function isSameOrigin(baseUrl: string, targetUrl: string): boolean {
+    return new URL(baseUrl).origin === new URL(targetUrl).origin;
 }

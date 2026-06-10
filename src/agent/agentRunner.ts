@@ -4,46 +4,19 @@ import {generateTestCases} from "./testCaseGenerator";
 import {generatePlaywrightTestFile} from "./testFileGenerator";
 import {ensureProjectDirectories, writeProjectFile} from "../utils/fileSystem";
 import {runShellCommand} from "../utils/shell";
-import {validatePomContract} from "./validators/pomContractValidator";
 
 async function main(): Promise<void> {
     await ensureProjectDirectories();
 
     const baseUrl = process.env.BASE_URL ?? "https://www.saucedemo.com";
-    const username = process.env.SAUCE_USERNAME;
-    const password = process.env.SAUCE_PASSWORD;
-
-    const analysis = await analyzeSite(baseUrl, {
-        auth:
-            username && password
-                ? {
-                    username,
-                    password,
-                }
-                : undefined,
-    });
-
-    const pomContract = validatePomContract(analysis);
-
-    const analyzedPagesCount = analysis.pages.length;
-    const totalInputs = analysis.pages.reduce((sum, page) => sum + page.inputs.length, 0);
-    const totalButtons = analysis.pages.reduce((sum, page) => sum + page.buttons.length, 0);
-    const totalLinks = analysis.pages.reduce((sum, page) => sum + page.links.length, 0);
-    const totalForms = analysis.pages.reduce((sum, page) => sum + page.forms.length, 0);
-    const pageSummary = analysis.pages
-        .map((page) => `- ${page.pageName}: ${page.url}`)
-        .join("\n");
 
     console.log(`Analyzing site: ${baseUrl}`);
+
+    const analysis = await analyzeSite(baseUrl);
 
     await writeProjectFile(
         "agent-output/analysis/saucedemo-analysis.json",
         JSON.stringify(analysis, null, 2),
-    );
-
-    await writeProjectFile(
-        "agent-output/validation/pom-contract-validation.json",
-        JSON.stringify(pomContract, null, 2),
     );
 
     console.log("Generating test cases with AI...");
@@ -80,18 +53,6 @@ async function main(): Promise<void> {
 
     const playwrightVersion = await runShellCommand("npx", ["playwright", "--version"]);
 
-    const pomContractSummary = pomContract.checkedMethods
-        .map((method) => {
-            const status = method.exists ? "OK" : "MISSING";
-
-            return `- ${status}: ${method.pomMethod} -> ${method.filePath}`;
-        })
-        .join("\n");
-
-    const flowSummary = analysis.flowGraph.actions
-        .map((action) => `- ${action.fromPage} -> ${action.toPage}: ${action.pomMethod}`)
-        .join("\n");
-
     await writeProjectFile(
         "agent-output/reports/agent-report.md",
         [
@@ -100,28 +61,15 @@ async function main(): Promise<void> {
             "## Site analysis",
             "",
             `Base URL: ${analysis.baseUrl}`,
-            `Analyzed pages: ${analyzedPagesCount}`,
-            "",
-            "## Pages",
-            "",
-            pageSummary,
-            "",
-            "## Flow graph",
-            "",
-            flowSummary,
-            "",
-            "## POM contract validation",
-            "",
-            `Status: ${pomContract.isValid ? "PASSED" : "FAILED"}`,
-            "",
-            pomContractSummary,
+            `Pages analyzed: ${analysis.pages.length}`,
+            `Transitions discovered: ${analysis.transitions.length}`,
             "",
             "## Elements found",
             "",
-            `Inputs: ${totalInputs}`,
-            `Buttons: ${totalButtons}`,
-            `Links: ${totalLinks}`,
-            `Forms: ${totalForms}`,
+            `Inputs: ${analysis.pages.reduce((total, analyzedPage) => total + analyzedPage.inputs.length, 0)}`,
+            `Buttons: ${analysis.pages.reduce((total, analyzedPage) => total + analyzedPage.buttons.length, 0)}`,
+            `Links: ${analysis.pages.reduce((total, analyzedPage) => total + analyzedPage.links.length, 0)}`,
+            `Headings: ${analysis.pages.reduce((total, analyzedPage) => total + analyzedPage.headings.length, 0)}`,
             "",
             "## Generated test cases",
             "",
